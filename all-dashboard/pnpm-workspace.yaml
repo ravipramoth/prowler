@@ -1,6 +1,14 @@
 allowBuilds:
   '@parcel/watcher': true
   core-js: true
+  esbuild: true
+  sharp: true
+  unrs-resolver: true
+  workerd: true
 onlyBuiltDependencies:
   - "@parcel/watcher"
   - "core-js"
+  - "esbuild"
+  - "sharp"
+  - "unrs-resolver"
+  - "workerd"

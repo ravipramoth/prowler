@@ -164,6 +164,12 @@ function parseDamagedProwlerCsv(text: string): Record<string, string>[] {
 }
 
 function normalizeProwlerRows(rows: Record<string, string>[]): Finding[] {
+  const severityByCheck = new Map<string, unknown>();
+  rows.forEach((raw) => {
+    const checkId = String(valueAt(raw, ["check_id", "checkid", "finding_uid", "findinguid"]));
+    const severity = valueAt(raw, ["severity"]);
+    if (checkId && severity && !severityByCheck.has(checkId)) severityByCheck.set(checkId, severity);
+  });
   return rows.map((raw, index): Finding => {
     const checkId = String(valueAt(raw, ["check_id", "checkid", "finding_uid", "findinguid"]) || `row-${index + 1}`);
     const status = String(valueAt(raw, ["status", "finding_status", "findingstatus"]) || "UNKNOWN").toUpperCase();
@@ -172,7 +178,7 @@ function normalizeProwlerRows(rows: Record<string, string>[]): Finding[] {
     return {
       id: checkId,
       title: String(valueAt(raw, ["check_title", "checktitle", "finding_title", "findingtitle", "title"]) || checkId),
-      severity: normalizeSeverity(valueAt(raw, ["severity", "risk"])),
+      severity: normalizeSeverity(valueAt(raw, ["severity"]) || severityByCheck.get(checkId) || valueAt(raw, ["risk"])),
       status,
       asset: resource,
       location: String(valueAt(raw, ["region", "location", "account_name", "accountname"]) || "Global"),
@@ -185,33 +191,14 @@ function normalizeProwlerRows(rows: Record<string, string>[]): Finding[] {
   });
 }
 
-function deduplicateProwlerFindings(findings: Finding[]): Finding[] {
-  const groups = new Map<string, { finding: Finding; timestamp: string; timestamps: Set<string>; occurrences: number }>();
-  findings.forEach((finding) => {
-    const account = String(valueAt(finding.raw, ["account_uid", "accountuid", "account_name", "accountname"]));
-    const resource = String(valueAt(finding.raw, ["resource_uid", "resourceuid", "resource_arn", "resourcearn"]) || valueAt(finding.raw, ["finding_uid", "findinguid"]) || finding.asset);
-    const timestamp = String(valueAt(finding.raw, ["timestamp"]));
-    const key = `${account}\u0000${finding.id}\u0000${resource}`;
-    const existing = groups.get(key);
-    if (!existing) {
-      groups.set(key, { finding, timestamp, timestamps: new Set(timestamp ? [timestamp] : []), occurrences: 1 });
-      return;
-    }
-    existing.occurrences++;
-    if (timestamp) existing.timestamps.add(timestamp);
-    if (timestamp >= existing.timestamp) {
-      existing.finding = finding;
-      existing.timestamp = timestamp;
-    }
-  });
-  return Array.from(groups.values(), ({ finding, timestamps, occurrences }) => ({
-    ...finding,
-    raw: {
-      ...finding.raw,
-      scan_occurrences: occurrences,
-      scan_timestamps: Array.from(timestamps).sort().join(" | "),
-    },
-  }));
+function selectLatestProwlerRun(findings: Finding[]): Finding[] {
+  const timestamps = findings.map((finding) => String(valueAt(finding.raw, ["timestamp"]))).filter(Boolean);
+  const latestTimestamp = timestamps.sort().at(-1);
+  if (!latestTimestamp) return findings;
+  // A Prowler row is a result, even when two credentials share a resource UID.
+  // When an export combines multiple runs, retain the complete latest run rather
+  // than deduplicating legitimate rows inside that run.
+  return findings.filter((finding) => String(valueAt(finding.raw, ["timestamp"])) === latestTimestamp);
 }
 
 function parseProwler(text: string): ScanData {
@@ -234,7 +221,7 @@ function parseProwler(text: string): ScanData {
     else throw new Error("This CSV does not match a Prowler export. A check/finding ID and status column are required.");
   }
   const normalized = normalizeProwlerRows(rows);
-  const findings = deduplicateProwlerFindings(normalized);
+  const findings = selectLatestProwlerRun(normalized);
   const scanRuns = new Set(rows.map((row) => String(valueAt(row, ["timestamp"]))).filter(Boolean)).size;
   return {
     fileName: "",
@@ -243,7 +230,7 @@ function parseProwler(text: string): ScanData {
     meta: {
       "scan rows": rows.length,
       "scan runs": scanRuns || 1,
-      "unique findings": findings.length,
+      "current findings": findings.length,
       failed: findings.filter((finding) => finding.status === "FAIL").length,
       passed: findings.filter((finding) => finding.status === "PASS").length,
       ...(recovered ? { format: "Recovered Prowler CSV" } : {}),
@@ -448,8 +435,8 @@ function Dashboard({ cloudEnabled, userEmail, onSignOut }: { cloudEnabled: boole
   const visible = useMemo(() => {
     if (!current) return [];
     const term = query.toLowerCase().trim();
-    return statusFindings.filter((finding) => (severity === "all" || finding.severity === severity) && (serviceFilter === "all" || finding.category === serviceFilter) && (regionFilter === "all" || finding.location === regionFilter) && (!term || [finding.id, finding.title, finding.asset, finding.location, finding.category, finding.status].join(" ").toLowerCase().includes(term)));
-  }, [current, query, severity, serviceFilter, regionFilter, statusFindings]);
+    return statusFindings.filter((finding) => (severity === "all" || (finding.severity === severity && (active !== "prowler" || resultStatus !== "all" || finding.status === "FAIL"))) && (serviceFilter === "all" || finding.category === serviceFilter) && (regionFilter === "all" || finding.location === regionFilter) && (!term || [finding.id, finding.title, finding.asset, finding.location, finding.category, finding.status].join(" ").toLowerCase().includes(term)));
+  }, [active, current, query, resultStatus, severity, serviceFilter, regionFilter, statusFindings]);
 
   const findingGroups = useMemo(() => {
     const groups = new Map<string, Finding[]>();
@@ -464,11 +451,15 @@ function Dashboard({ cloudEnabled, userEmail, onSignOut }: { cloudEnabled: boole
   const regionOptions = useMemo(() => Array.from(new Set(statusFindings.map((finding) => finding.location).filter(Boolean))).sort(), [statusFindings]);
   const relatedFindings = useMemo(() => selected && current ? current.findings.filter((finding) => finding.asset === selected.asset && !(finding.id === selected.id && finding.title === selected.title)).slice(0, 12) : [], [current, selected]);
 
-  const counts = useMemo(() => Object.fromEntries(severityOrder.map((level) => [level, statusFindings.filter((f) => f.severity === level).length])) as Record<Severity, number>, [statusFindings]);
+  const severityFindings = useMemo(() => active === "prowler" && resultStatus === "all" ? statusFindings.filter((finding) => finding.status === "FAIL") : statusFindings, [active, resultStatus, statusFindings]);
+  const counts = useMemo(() => Object.fromEntries(severityOrder.map((level) => [level, severityFindings.filter((f) => f.severity === level).length])) as Record<Severity, number>, [severityFindings]);
   const prowlerStatusCounts = useMemo(() => ({
     fail: current?.findings.filter((finding) => finding.status === "FAIL").length ?? 0,
     pass: current?.findings.filter((finding) => finding.status === "PASS").length ?? 0,
   }), [current]);
+  const prowlerAutomatedTotal = prowlerStatusCounts.fail + prowlerStatusCounts.pass;
+  const prowlerPassRate = prowlerAutomatedTotal ? (prowlerStatusCounts.pass / prowlerAutomatedTotal) * 100 : 0;
+  const urgentRate = statusFindings.length ? ((counts.critical + counts.high) / statusFindings.length) * 100 : 0;
   const complianceTotals = useMemo(() => {
     const items = current?.compliance ?? [];
     const totals = items.reduce((sum, item) => ({ total: sum.total + item.total, pass: sum.pass + item.pass, fail: sum.fail + item.fail, manual: sum.manual + item.manual }), { total: 0, pass: 0, fail: 0, manual: 0 });
@@ -652,7 +643,7 @@ function Dashboard({ cloudEnabled, userEmail, onSignOut }: { cloudEnabled: boole
             <>
               {error && <div className="errorBox topError" role="alert">{error}</div>}
               <section className="reportMeta">
-                <div><span className="fileBadge"><AppIcon name="file" /></span><div><strong>{current.fileName}</strong><small>Imported {formatDate(current.importedAt)} · {current.findings.length.toLocaleString()} unique findings{active === "prowler" ? " (latest result per check and full resource ID)" : ""}</small></div></div>
+                <div><span className="fileBadge"><AppIcon name="file" /></span><div><strong>{current.fileName}</strong><small>Imported {formatDate(current.importedAt)} · {current.findings.length.toLocaleString()} {active === "prowler" ? "results from the latest scan run" : "normalized findings"}</small></div></div>
                 <div className="metaStats">{Object.entries(current.meta).slice(0, 4).map(([key, value]) => <span key={key}><small>{key}</small><strong>{String(value)}</strong></span>)}</div>
               </section>
 
@@ -680,8 +671,8 @@ function Dashboard({ cloudEnabled, userEmail, onSignOut }: { cloudEnabled: boole
               </section>}
 
               <section className="summaryGrid">
-                <article className="totalCard"><div><small>{active === "prowler" && resultStatus !== "all" ? `${resultStatus} CHECKS` : "TOTAL FINDINGS"}</small><strong>{statusFindings.length.toLocaleString()}</strong><p>{visible.length === statusFindings.length ? (resultStatus === "all" ? "Across the complete report" : `of ${current.findings.length.toLocaleString()} total checks`) : `${visible.length.toLocaleString()} match current filters`}</p></div><div className="donut" style={{ background: `conic-gradient(#ef4b5f 0 ${statusFindings.length ? (counts.critical / statusFindings.length) * 100 : 0}%, #ff8a3d 0 ${statusFindings.length ? ((counts.critical + counts.high) / statusFindings.length) * 100 : 0}%, #f5be3d 0 ${statusFindings.length ? ((counts.critical + counts.high + counts.medium) / statusFindings.length) * 100 : 0}%, #67b7a8 0 100%)` }}><span>{statusFindings.length ? Math.round(((counts.critical + counts.high) / statusFindings.length) * 100) : 0}%<small>urgent</small></span></div></article>
-                {severityOrder.map((level) => <button key={level} className={`severityCard ${level} ${severity === level ? "selected" : ""}`} onClick={() => setSeverity(severity === level ? "all" : level)}><span className="severityLine" /><small>{severityLabel[level].toUpperCase()}</small><strong>{counts[level].toLocaleString()}</strong><div className="miniBar"><i style={{ width: `${statusFindings.length ? Math.max(3, (counts[level] / statusFindings.length) * 100) : 0}%` }} /></div></button>)}
+                <article className="totalCard"><div><small>{active === "prowler" && resultStatus !== "all" ? `${resultStatus} CHECKS` : "TOTAL FINDINGS"}</small><strong>{statusFindings.length.toLocaleString()}</strong><p>{visible.length === statusFindings.length ? (resultStatus === "all" ? "Across the complete report" : `of ${current.findings.length.toLocaleString()} total checks`) : `${visible.length.toLocaleString()} match current filters`}</p></div><div className="donut" style={{ background: active === "prowler" ? `conic-gradient(#1aa184 0 ${prowlerPassRate}%, #ef4b5f 0 100%)` : `conic-gradient(#ef4b5f 0 ${statusFindings.length ? (counts.critical / statusFindings.length) * 100 : 0}%, #ff8a3d 0 ${statusFindings.length ? ((counts.critical + counts.high) / statusFindings.length) * 100 : 0}%, #f5be3d 0 ${statusFindings.length ? ((counts.critical + counts.high + counts.medium) / statusFindings.length) * 100 : 0}%, #67b7a8 0 100%)` }}><span>{active === "prowler" ? prowlerPassRate.toFixed(2) : Math.round(urgentRate)}%<small>{active === "prowler" ? "passed" : "urgent"}</small></span></div></article>
+                {severityOrder.map((level) => <button key={level} className={`severityCard ${level} ${severity === level ? "selected" : ""}`} onClick={() => setSeverity(severity === level ? "all" : level)}><span className="severityLine" /><small>{active === "prowler" && resultStatus === "all" ? `FAILED ${severityLabel[level].toUpperCase()}` : severityLabel[level].toUpperCase()}</small><strong>{counts[level].toLocaleString()}</strong><div className="miniBar"><i style={{ width: `${severityFindings.length ? Math.max(3, (counts[level] / severityFindings.length) * 100) : 0}%` }} /></div></button>)}
               </section>
 
               <section className="findingsPanel">
