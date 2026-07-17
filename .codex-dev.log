@@ -1,0 +1,36 @@
+   ▲ Next.js 15.5.20
+   - Local:        http://localhost:3000
+   - Network:      http://192.168.0.112:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 18.3s
+ ○ Compiling / ...
+ ✓ Compiled / in 8.9s (3408 modules)
+ GET / 200 in 11158ms
+ GET / 200 in 213ms
+ GET / 200 in 90ms
+ GET / 200 in 174ms
+ ○ Compiling /api/security-chat ...
+ ✓ Compiled /api/security-chat in 10.8s (3442 modules)
+ GET /api/security-chat 200 in 11239ms
+ GET / 200 in 478ms
+ GET / 200 in 478ms
+ ✓ Compiled in 1101ms (1619 modules)
+ GET / 200 in 105ms
+ GET / 200 in 101ms
+ GET / 200 in 2272ms
+   ▲ Next.js 15.5.20
+   - Local:        http://localhost:3000
+   - Network:      http://10.81.234.132:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 6.3s
+   ▲ Next.js 15.5.20
+   - Local:        http://localhost:3000
+   - Network:      http://10.81.234.132:3000
+   - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 2.4s
